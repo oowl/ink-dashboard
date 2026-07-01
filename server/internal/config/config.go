@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+
+	"ink-dashboard/server/internal/layout"
 )
 
 type Config struct {
@@ -22,6 +24,7 @@ type Config struct {
 	DefaultWidth    int
 	DefaultHeight   int
 	DefaultOrient   string
+	Layout          layout.Document
 	RSVGConvertPath string
 	Timezone        string
 	Language        string
@@ -54,23 +57,24 @@ type Config struct {
 }
 
 type AdminSettings struct {
-	PublicBaseURL        string   `json:"public_base_url"`
-	RefreshSeconds       int      `json:"refresh_seconds"`
-	DefaultWidth         int      `json:"default_width"`
-	DefaultHeight        int      `json:"default_height"`
-	DefaultOrient        string   `json:"default_orientation"`
-	Timezone             string   `json:"timezone"`
-	Language             string   `json:"language"`
-	WeatherProvider      string   `json:"weather_provider"`
-	WeatherLatitude      float64  `json:"weather_latitude"`
-	WeatherLongitude     float64  `json:"weather_longitude"`
-	WeatherLocation      string   `json:"weather_location"`
-	CaiyunToken          string   `json:"caiyun_token"`
-	CaiyunLang           string   `json:"caiyun_lang"`
-	CaiyunUnit           string   `json:"caiyun_unit"`
-	CalendarICSURLs      []string `json:"calendar_ics_urls"`
-	CalendarLookaheadDay int      `json:"calendar_lookahead_days"`
-	CalendarMaxEvents    int      `json:"calendar_max_events"`
+	PublicBaseURL        string          `json:"public_base_url"`
+	RefreshSeconds       int             `json:"refresh_seconds"`
+	DefaultWidth         int             `json:"default_width"`
+	DefaultHeight        int             `json:"default_height"`
+	DefaultOrient        string          `json:"default_orientation"`
+	Layout               layout.Document `json:"layout"`
+	Timezone             string          `json:"timezone"`
+	Language             string          `json:"language"`
+	WeatherProvider      string          `json:"weather_provider"`
+	WeatherLatitude      float64         `json:"weather_latitude"`
+	WeatherLongitude     float64         `json:"weather_longitude"`
+	WeatherLocation      string          `json:"weather_location"`
+	CaiyunToken          string          `json:"caiyun_token"`
+	CaiyunLang           string          `json:"caiyun_lang"`
+	CaiyunUnit           string          `json:"caiyun_unit"`
+	CalendarICSURLs      []string        `json:"calendar_ics_urls"`
+	CalendarLookaheadDay int             `json:"calendar_lookahead_days"`
+	CalendarMaxEvents    int             `json:"calendar_max_events"`
 }
 
 func Load() Config {
@@ -98,6 +102,7 @@ func Load() Config {
 		DefaultWidth:    envInt("INKDASH_DEFAULT_WIDTH", 600),
 		DefaultHeight:   envInt("INKDASH_DEFAULT_HEIGHT", 800),
 		DefaultOrient:   env("INKDASH_ORIENTATION", "auto"),
+		Layout:          layout.DefaultDocument(),
 		RSVGConvertPath: env("INKDASH_RSVG_CONVERT", "rsvg-convert"),
 		Timezone:        env("INKDASH_TIMEZONE", "Asia/Shanghai"),
 		Language:        env("INKDASH_LANGUAGE", "zh-CN"),
@@ -139,6 +144,7 @@ func Load() Config {
 func (c *Config) Normalize() {
 	c.PublicBaseURL = strings.TrimRight(c.PublicBaseURL, "/")
 	c.DefaultOrient = normalizeOrientation(c.DefaultOrient)
+	c.Layout = layout.NormalizeDocument(c.Layout)
 	c.Language = NormalizeLanguage(c.Language)
 	c.WeatherProvider = strings.ToLower(strings.TrimSpace(c.WeatherProvider))
 	if c.WeatherProvider == "open-meteo" {
@@ -220,6 +226,7 @@ func (c Config) AdminSettings() AdminSettings {
 		DefaultWidth:         c.DefaultWidth,
 		DefaultHeight:        c.DefaultHeight,
 		DefaultOrient:        c.DefaultOrient,
+		Layout:               c.Layout,
 		Timezone:             c.Timezone,
 		Language:             c.Language,
 		WeatherProvider:      c.WeatherProvider,
@@ -273,6 +280,9 @@ func ApplyAdminSettings(c *Config, settings AdminSettings) {
 	}
 	if settings.DefaultOrient != "" {
 		c.DefaultOrient = settings.DefaultOrient
+	}
+	if !layout.IsZero(settings.Layout) {
+		c.Layout = settings.Layout
 	}
 	if settings.Timezone != "" {
 		c.Timezone = settings.Timezone

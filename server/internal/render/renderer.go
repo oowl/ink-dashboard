@@ -5,14 +5,17 @@ import (
 	"encoding/hex"
 	"fmt"
 	"html"
+	"math"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
 	"ink-dashboard/server/internal/config"
 	"ink-dashboard/server/internal/dashboard"
+	"ink-dashboard/server/internal/layout"
 )
 
 const svgFontFamily = "'Noto Sans CJK SC', 'Microsoft YaHei', 'PingFang SC', 'WenQuanYi Micro Hei', Arial, Helvetica, sans-serif"
@@ -26,6 +29,7 @@ type RenderRequest struct {
 	Height      int
 	Orientation string
 	Language    string
+	Layout      layout.Document
 	LocalClock  bool
 	Snapshot    dashboard.Snapshot
 }
@@ -52,6 +56,9 @@ func (r *Renderer) RenderPNG(req RenderRequest) (RenderedScreen, error) {
 	}
 	if req.Language == "" {
 		req.Language = r.cfg.Language
+	}
+	if layout.IsZero(req.Layout) {
+		req.Layout = r.cfg.Layout
 	}
 
 	svg := renderSVG(req)
@@ -105,6 +112,9 @@ func (r *Renderer) PreviewSVG(req RenderRequest) string {
 	if req.Language == "" {
 		req.Language = r.cfg.Language
 	}
+	if layout.IsZero(req.Layout) {
+		req.Layout = r.cfg.Layout
+	}
 	return renderSVG(req)
 }
 
@@ -137,23 +147,7 @@ func renderSVG(req RenderRequest) string {
 		now = time.Now()
 	}
 
-	padding := 28
-	if layoutW < 700 {
-		padding = 24
-	}
-
-	cardGap := 14
 	cardRadius := 0
-	headerH := 104
-	contentY := padding + headerH
-	contentH := layoutH - contentY - padding
-
-	leftW := (layoutW - padding*2 - cardGap) * 58 / 100
-	rightW := layoutW - padding*2 - cardGap - leftW
-	if !landscapeCanvas {
-		leftW = layoutW - padding*2
-		rightW = leftW
-	}
 
 	var b strings.Builder
 	fmt.Fprintf(&b, `<svg xmlns="http://www.w3.org/2000/svg" width="%d" height="%d" viewBox="0 0 %d %d">`, width, height, width, height)
@@ -161,56 +155,172 @@ func renderSVG(req RenderRequest) string {
 	b.WriteString(transformOpen)
 	fmt.Fprintf(&b, `<rect x="0" y="0" width="%d" height="%d" fill="#f8f8f3"/>`, layoutW, layoutH)
 
-	renderHeader(&b, padding, layoutW, now, req.Snapshot.Weather, language, req.LocalClock)
-	line(&b, padding, padding+headerH-8, layoutW-padding, padding+headerH-8, 2)
-
-	if landscapeCanvas {
-		renderSchedule(&b, padding, contentY, leftW, contentH, cardRadius, req.Snapshot.Events, language)
-		renderRightColumn(&b, padding+leftW+cardGap, contentY, rightW, contentH, cardRadius, req.Snapshot, language)
-	} else {
-		usageH := 184
-		if hasWindowUsage(req.Snapshot.Usage) {
-			usageH = 250
-		}
-		scheduleH := contentH - usageH - cardGap
-		if scheduleH < 240 {
-			scheduleH = 240
-		}
-		renderSchedule(&b, padding, contentY, leftW, scheduleH, cardRadius, req.Snapshot.Events, language)
-		renderUsage(&b, padding, contentY+scheduleH+cardGap, rightW, usageH, cardRadius, req.Snapshot.Usage, language)
-	}
+	renderLayoutComponents(&b, req, layoutW, layoutH, landscapeCanvas, cardRadius, language, now)
 
 	b.WriteString(transformClose)
 	b.WriteString(`</svg>`)
 	return b.String()
 }
 
-func renderHeader(b *strings.Builder, padding, layoutW int, now time.Time, weather dashboard.Weather, language string, localClock bool) {
-	right := layoutW - padding
-	weatherW := layoutW - padding*2 - 240
-	if weatherW < 180 {
-		weatherW = 180
+func renderLayoutComponents(b *strings.Builder, req RenderRequest, layoutW, layoutH int, landscapeCanvas bool, radius int, language string, now time.Time) {
+	key := "portrait"
+	if landscapeCanvas {
+		key = "landscape"
 	}
+	board := layout.ArtboardFor(req.Layout, key, layoutW, layoutH)
+	scaleX := float64(layoutW) / float64(board.Width)
+	scaleY := float64(layoutH) / float64(board.Height)
 
-	if !localClock {
-		text(b, padding, padding+48, now.Format("15:04"), 52, 800)
-		text(b, padding+2, padding+78, headerDate(now, language), 16, 500)
+	for _, component := range board.Components {
+		x := scaled(component.X, scaleX)
+		y := scaled(component.Y, scaleY)
+		w := scaled(component.W, scaleX)
+		h := scaled(component.H, scaleY)
+		renderLayoutComponent(b, component, x, y, w, h, radius, req, language, now)
 	}
+}
 
-	textAnchor(b, right, padding+30, fitText(weather.Condition, weatherW, 18), 18, 650, "end")
-	temp := fitText(weather.Temperature, weatherW, 36)
-	tempW := estimatedTextWidth(temp, 36)
-	if high, low := highLowLines(weather.HighLow); high != "" {
+func renderLayoutComponent(b *strings.Builder, component layout.Component, x, y, w, h, radius int, req RenderRequest, language string, now time.Time) {
+	switch component.Type {
+	case "clock":
+		if !req.LocalClock {
+			renderClockWidget(
+				b,
+				x,
+				y,
+				h,
+				now,
+				language,
+				componentProp(component.Props, "format", "15:04"),
+				componentBoolProp(component.Props, "show_date", true),
+			)
+		}
+	case "weather":
+		renderWeatherWidget(
+			b,
+			x,
+			y,
+			w,
+			h,
+			req.Snapshot.Weather,
+			componentBoolProp(component.Props, "show_condition", true),
+			componentBoolProp(component.Props, "show_high_low", true),
+			componentBoolProp(component.Props, "show_meta", true),
+		)
+	case "ai_usage":
+		renderUsage(
+			b,
+			x,
+			y,
+			w,
+			h,
+			radius,
+			req.Snapshot.Usage,
+			language,
+			componentProp(component.Props, "title", label("ai_usage", language)),
+			componentIntProp(component.Props, "max_items", 0),
+		)
+	case "notes":
+		renderNotes(
+			b,
+			x,
+			y,
+			w,
+			h,
+			radius,
+			req.Snapshot.Notes,
+			componentProp(component.Props, "title", label("notes", language)),
+			componentIntProp(component.Props, "max_items", 0),
+		)
+	default:
+		renderSchedule(
+			b,
+			x,
+			y,
+			w,
+			h,
+			radius,
+			req.Snapshot.Events,
+			language,
+			componentProp(component.Props, "title", label("calendar", language)),
+			componentIntProp(component.Props, "max_items", 0),
+		)
+	}
+}
+
+func scaled(value int, scale float64) int {
+	return int(math.Round(float64(value) * scale))
+}
+
+func componentProp(props map[string]string, key, fallback string) string {
+	value := strings.TrimSpace(props[key])
+	if value == "" {
+		return fallback
+	}
+	return value
+}
+
+func componentBoolProp(props map[string]string, key string, fallback bool) bool {
+	value := strings.ToLower(strings.TrimSpace(props[key]))
+	if value == "" {
+		return fallback
+	}
+	switch value {
+	case "1", "true", "yes", "on":
+		return true
+	case "0", "false", "no", "off":
+		return false
+	default:
+		return fallback
+	}
+}
+
+func componentIntProp(props map[string]string, key string, fallback int) int {
+	value := strings.TrimSpace(props[key])
+	if value == "" {
+		return fallback
+	}
+	parsed, err := strconv.Atoi(value)
+	if err != nil || parsed < 0 {
+		return fallback
+	}
+	return parsed
+}
+
+func renderClockWidget(b *strings.Builder, x, y, h int, now time.Time, language string, format string, showDate bool) {
+	timeSize := clamp(h*13/20, 26, 64)
+	dateSize := clamp(h/5, 12, 18)
+	text(b, x, y+timeSize, now.Format(format), timeSize, 800)
+	if showDate {
+		text(b, x+2, y+timeSize+dateSize+12, headerDate(now, language), dateSize, 500)
+	}
+}
+
+func renderWeatherWidget(b *strings.Builder, x, y, w, h int, weather dashboard.Weather, showCondition, showHighLow, showMeta bool) {
+	right := x + w
+	conditionSize := clamp(h/4, 13, 20)
+	tempSize := clamp(h*9/20, 24, 42)
+	metaSize := clamp(h/6, 11, 14)
+
+	if showCondition {
+		textAnchor(b, right, y+conditionSize+4, fitText(weather.Condition, w, conditionSize), conditionSize, 650, "end")
+	}
+	temp := fitText(weather.Temperature, w, tempSize)
+	tempW := estimatedTextWidth(temp, tempSize)
+	if high, low := highLowLines(weather.HighLow); showHighLow && high != "" {
 		labelRight := right - tempW - 8
-		if labelRight > padding+220 {
-			textAnchor(b, labelRight, padding+52, fitText(high, 72, 14), 14, 650, "end")
+		if labelRight > x+70 {
+			highLowSize := clamp(h/6, 11, 14)
+			textAnchor(b, labelRight, y+conditionSize+tempSize/2, fitText(high, 72, highLowSize), highLowSize, 650, "end")
 			if low != "" {
-				textAnchor(b, labelRight, padding+72, fitText(low, 72, 14), 14, 650, "end")
+				textAnchor(b, labelRight, y+conditionSize+tempSize/2+highLowSize+6, fitText(low, 72, highLowSize), highLowSize, 650, "end")
 			}
 		}
 	}
-	textAnchor(b, right, padding+64, temp, 36, 800, "end")
-	boundedTextAnchor(b, right, padding+88, weatherW, weatherMeta(weather), 13, 500, "end")
+	textAnchor(b, right, y+conditionSize+tempSize+8, temp, tempSize, 800, "end")
+	if showMeta {
+		boundedTextAnchor(b, right, y+h-4, w, weatherMeta(weather), metaSize, 500, "end")
+	}
 }
 
 func highLowLines(value string) (string, string) {
@@ -275,8 +385,8 @@ func zhWeekday(day time.Weekday) string {
 	return names[int(day)]
 }
 
-func renderSchedule(b *strings.Builder, x, y, w, h, radius int, events []dashboard.Event, language string) {
-	card(b, x, y, w, h, radius, label("calendar", language))
+func renderSchedule(b *strings.Builder, x, y, w, h, radius int, events []dashboard.Event, language string, title string, maxItems int) {
+	card(b, x, y, w, h, radius, title)
 	yy := y + 62
 	innerX := x + 20
 	innerRight := x + w - 20
@@ -299,7 +409,11 @@ func renderSchedule(b *strings.Builder, x, y, w, h, radius int, events []dashboa
 	}
 
 	currentDay := ""
+	rendered := 0
 	for i, ev := range events {
+		if maxItems > 0 && rendered >= maxItems {
+			break
+		}
 		day := eventDay(ev, language)
 		if day != currentDay {
 			if yy+26 > y+h {
@@ -329,6 +443,7 @@ func renderSchedule(b *strings.Builder, x, y, w, h, radius int, events []dashboa
 			line(b, innerX, yy+40, innerRight, yy+40, 1)
 		}
 		yy += 60
+		rendered++
 	}
 }
 
@@ -347,7 +462,7 @@ func eventDay(event dashboard.Event, language string) string {
 }
 
 func renderRightColumn(b *strings.Builder, x, y, w, h, radius int, snap dashboard.Snapshot, language string) {
-	renderUsage(b, x, y, w, h, radius, snap.Usage, language)
+	renderUsage(b, x, y, w, h, radius, snap.Usage, language, label("ai_usage", language), 0)
 }
 
 func renderWeather(b *strings.Builder, x, y, w, h, radius int, weather dashboard.Weather, language string) {
@@ -358,10 +473,13 @@ func renderWeather(b *strings.Builder, x, y, w, h, radius int, weather dashboard
 	boundedText(b, x+20, y+130, w-40, weather.HighLow+" · "+weather.Wind, 15, 450)
 }
 
-func renderUsage(b *strings.Builder, x, y, w, h, radius int, usages []dashboard.Usage, language string) {
-	card(b, x, y, w, h, radius, label("ai_usage", language))
+func renderUsage(b *strings.Builder, x, y, w, h, radius int, usages []dashboard.Usage, language string, title string, maxItems int) {
+	card(b, x, y, w, h, radius, title)
 	yy := y + 62
-	for _, usage := range usages {
+	for idx, usage := range usages {
+		if maxItems > 0 && idx >= maxItems {
+			break
+		}
 		rowH := 64
 		if len(usage.Windows) > 0 {
 			rowH = 148
@@ -444,10 +562,13 @@ func usageResetText(reset string, language string) string {
 	return "reset " + reset
 }
 
-func renderNotes(b *strings.Builder, x, y, w, h, radius int, notes []string, language string) {
-	card(b, x, y, w, h, radius, label("notes", language))
+func renderNotes(b *strings.Builder, x, y, w, h, radius int, notes []string, title string, maxItems int) {
+	card(b, x, y, w, h, radius, title)
 	yy := y + 50
-	for _, note := range notes {
+	for idx, note := range notes {
+		if maxItems > 0 && idx >= maxItems {
+			break
+		}
 		if yy+34 > y+h {
 			break
 		}

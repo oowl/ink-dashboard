@@ -3,6 +3,7 @@ package web
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"html/template"
 	"net/http"
 	"net/url"
@@ -11,28 +12,32 @@ import (
 	"time"
 
 	"ink-dashboard/server/internal/config"
+	"ink-dashboard/server/internal/layout"
 )
 
 type adminPageData struct {
-	Config             config.Config
-	Text               adminText
-	Token              string
-	Saved              bool
-	Error              string
-	CalendarSummary    string
-	CalendarFeeds      []calendarFeedView
-	CalendarConfigured bool
-	CaiyunConfigured   bool
-	PreviewURL         string
-	PreviewLandscape   bool
-	CaiyunSelected     bool
-	OpenSelected       bool
-	AutoSelected       bool
-	PortraitSelected   bool
-	LandscapeSelected  bool
-	RotatedSelected    bool
-	EnglishSelected    bool
-	ChineseSelected    bool
+	Config               config.Config
+	Text                 adminText
+	Token                string
+	Saved                bool
+	Error                string
+	CalendarSummary      string
+	CalendarFeeds        []calendarFeedView
+	CalendarConfigured   bool
+	CaiyunConfigured     bool
+	PreviewURL           string
+	PreviewLandscape     bool
+	LayoutJSON           template.JS
+	ComponentCatalogJSON template.JS
+	LayoutArtboard       string
+	CaiyunSelected       bool
+	OpenSelected         bool
+	AutoSelected         bool
+	PortraitSelected     bool
+	LandscapeSelected    bool
+	RotatedSelected      bool
+	EnglishSelected      bool
+	ChineseSelected      bool
 }
 
 type calendarFeedView struct {
@@ -57,6 +62,15 @@ type adminText struct {
 	PreviewWidth            string
 	PreviewHeight           string
 	Orientation             string
+	Layout                  string
+	LayoutHint              string
+	ComponentLibrary        string
+	View                    string
+	ConfigWeather           string
+	ConfigCalendar          string
+	SelectedComponent       string
+	DeleteComponent         string
+	NoComponentSelected     string
 	Weather                 string
 	Provider                string
 	Latitude                string
@@ -123,6 +137,17 @@ func (a *App) saveAdminConfig(w http.ResponseWriter, r *http.Request) {
 	}
 
 	calendarURLs := mergeCalendarURLs(cfg.CalendarICSURLs, selectedCalendarDeletes(r), splitCalendarURLs(r.FormValue("calendar_ics_urls")))
+	layoutDoc := cfg.Layout
+	if rawLayout := strings.TrimSpace(r.FormValue("layout_json")); rawLayout != "" {
+		if err := json.Unmarshal([]byte(rawLayout), &layoutDoc); err != nil {
+			data := adminData(cfg, token, false, "invalid layout: "+err.Error())
+			w.Header().Set("Content-Type", "text/html; charset=utf-8")
+			w.WriteHeader(http.StatusBadRequest)
+			_ = adminTemplate.Execute(w, data)
+			return
+		}
+		layoutDoc = layout.NormalizeDocument(layoutDoc)
+	}
 
 	settings := config.AdminSettings{
 		PublicBaseURL:        strings.TrimSpace(r.FormValue("public_base_url")),
@@ -130,6 +155,7 @@ func (a *App) saveAdminConfig(w http.ResponseWriter, r *http.Request) {
 		DefaultWidth:         formInt(r, "default_width", cfg.DefaultWidth),
 		DefaultHeight:        formInt(r, "default_height", cfg.DefaultHeight),
 		DefaultOrient:        strings.TrimSpace(r.FormValue("default_orientation")),
+		Layout:               layoutDoc,
 		Timezone:             strings.TrimSpace(r.FormValue("timezone")),
 		Language:             strings.TrimSpace(r.FormValue("language")),
 		WeatherProvider:      strings.TrimSpace(r.FormValue("weather_provider")),
@@ -169,25 +195,28 @@ func adminData(cfg config.Config, token string, saved bool, errMsg string) admin
 		"&orientation=" + url.QueryEscape(previewOrient) +
 		"&t=" + strconv.FormatInt(time.Now().Unix(), 10)
 	return adminPageData{
-		Config:             cfg,
-		Text:               text,
-		Token:              token,
-		Saved:              saved,
-		Error:              errMsg,
-		CalendarSummary:    secretListSummary(cfg.CalendarICSURLs, cfg.Language),
-		CalendarFeeds:      calendarFeedViews(cfg.CalendarICSURLs, cfg.Language),
-		CalendarConfigured: len(cfg.CalendarICSURLs) > 0,
-		CaiyunConfigured:   cfg.CaiyunToken != "",
-		PreviewURL:         preview,
-		PreviewLandscape:   previewLandscape,
-		CaiyunSelected:     cfg.WeatherProvider == "caiyun",
-		OpenSelected:       cfg.WeatherProvider == "openmeteo",
-		AutoSelected:       cfg.DefaultOrient == "auto",
-		PortraitSelected:   cfg.DefaultOrient == "portrait",
-		LandscapeSelected:  cfg.DefaultOrient == "landscape",
-		RotatedSelected:    cfg.DefaultOrient == "rotated",
-		EnglishSelected:    cfg.Language == "en",
-		ChineseSelected:    config.IsChinese(cfg.Language),
+		Config:               cfg,
+		Text:                 text,
+		Token:                token,
+		Saved:                saved,
+		Error:                errMsg,
+		CalendarSummary:      secretListSummary(cfg.CalendarICSURLs, cfg.Language),
+		CalendarFeeds:        calendarFeedViews(cfg.CalendarICSURLs, cfg.Language),
+		CalendarConfigured:   len(cfg.CalendarICSURLs) > 0,
+		CaiyunConfigured:     cfg.CaiyunToken != "",
+		PreviewURL:           preview,
+		PreviewLandscape:     previewLandscape,
+		LayoutJSON:           adminJSON(layout.NormalizeDocument(cfg.Layout)),
+		ComponentCatalogJSON: adminJSON(componentCatalog(text.HTMLLang)),
+		LayoutArtboard:       previewArtboard(previewLandscape),
+		CaiyunSelected:       cfg.WeatherProvider == "caiyun",
+		OpenSelected:         cfg.WeatherProvider == "openmeteo",
+		AutoSelected:         cfg.DefaultOrient == "auto",
+		PortraitSelected:     cfg.DefaultOrient == "portrait",
+		LandscapeSelected:    cfg.DefaultOrient == "landscape",
+		RotatedSelected:      cfg.DefaultOrient == "rotated",
+		EnglishSelected:      cfg.Language == "en",
+		ChineseSelected:      config.IsChinese(cfg.Language),
 	}
 }
 
@@ -210,6 +239,63 @@ func adminPreviewGeometry(cfg config.Config) (int, int, string, bool) {
 		orientation = "landscape"
 	}
 	return width, height, orientation, landscape
+}
+
+type componentCatalogItem struct {
+	Type     string `json:"type"`
+	Label    string `json:"label"`
+	DefaultW int    `json:"default_w"`
+	DefaultH int    `json:"default_h"`
+	MinW     int    `json:"min_w"`
+	MinH     int    `json:"min_h"`
+}
+
+func componentCatalog(htmlLang string) []componentCatalogItem {
+	labels := map[string]string{
+		"clock":    "Clock",
+		"weather":  "Weather",
+		"calendar": "Calendar",
+		"ai_usage": "AI Usage",
+		"notes":    "Notes",
+	}
+	if strings.HasPrefix(strings.ToLower(htmlLang), "zh") {
+		labels = map[string]string{
+			"clock":    "时间",
+			"weather":  "天气",
+			"calendar": "日程",
+			"ai_usage": "AI 用量",
+			"notes":    "备注",
+		}
+	}
+
+	defs := layout.ComponentDefs()
+	out := make([]componentCatalogItem, 0, len(defs))
+	for _, def := range defs {
+		out = append(out, componentCatalogItem{
+			Type:     def.Type,
+			Label:    labels[def.Type],
+			DefaultW: def.DefaultW,
+			DefaultH: def.DefaultH,
+			MinW:     def.MinW,
+			MinH:     def.MinH,
+		})
+	}
+	return out
+}
+
+func previewArtboard(landscape bool) string {
+	if landscape {
+		return "landscape"
+	}
+	return "portrait"
+}
+
+func adminJSON(value any) template.JS {
+	raw, err := json.Marshal(value)
+	if err != nil {
+		return "{}"
+	}
+	return template.JS(raw)
 }
 
 func renderAdminLogin(w http.ResponseWriter, _ *http.Request) {
@@ -335,6 +421,15 @@ func adminTextFor(language string) adminText {
 			PreviewWidth:            "预览宽度",
 			PreviewHeight:           "预览高度",
 			Orientation:             "方向",
+			Layout:                  "布局画布",
+			LayoutHint:              "拖动组件调整位置，拖右下角调整大小。保存后，Kindle 渲染会使用这份布局。",
+			ComponentLibrary:        "组件库",
+			View:                    "视图",
+			ConfigWeather:           "配置天气",
+			ConfigCalendar:          "配置日历",
+			SelectedComponent:       "选中组件",
+			DeleteComponent:         "删除组件",
+			NoComponentSelected:     "未选中组件",
 			Weather:                 "天气",
 			Provider:                "数据源",
 			Latitude:                "纬度",
@@ -381,6 +476,15 @@ func adminTextFor(language string) adminText {
 		PreviewWidth:            "Preview width",
 		PreviewHeight:           "Preview height",
 		Orientation:             "Orientation",
+		Layout:                  "Layout Canvas",
+		LayoutHint:              "Drag components to move them. Drag the bottom-right handle to resize. Saved layouts are used by Kindle rendering.",
+		ComponentLibrary:        "Components",
+		View:                    "View",
+		ConfigWeather:           "Config Weather",
+		ConfigCalendar:          "Config Calendar",
+		SelectedComponent:       "Selected component",
+		DeleteComponent:         "Delete component",
+		NoComponentSelected:     "No component selected",
 		Weather:                 "Weather",
 		Provider:                "Provider",
 		Latitude:                "Latitude",
@@ -451,7 +555,8 @@ var adminTemplate = template.Must(template.New("admin").Parse(`<!doctype html>
 	header{border-bottom:2px solid #111;padding:18px 24px;background:#fff}
 	h1{font-size:24px;margin:0}
 .sub{font-size:13px;margin-top:4px;color:#444}
-main{display:grid;grid-template-columns:minmax(360px,520px) 1fr;gap:24px;padding:24px;align-items:start}
+main{display:grid;grid-template-columns:minmax(300px,360px) minmax(1100px,1fr);grid-template-areas:"settings layout" "settings preview";gap:24px;padding:24px;align-items:start}
+.settings-form{grid-area:settings}
 section{border:1px solid #111;background:#fff;padding:16px;margin-bottom:16px}
 h2{font-size:16px;margin:0 0 12px}
 label{display:block;font-size:13px;font-weight:700;margin:12px 0 5px}
@@ -470,12 +575,40 @@ button{padding:10px 14px;border:1px solid #111;background:#111;color:#fff;font-w
 .delete-toggle input{width:auto;margin:0}
 .feed:has(.delete-toggle input:checked){background:#f4dddd;border-width:2px}
 .feed:has(.delete-toggle input:checked) .delete-toggle{background:#111;color:#fff}
-	.preview{position:sticky;top:24px}
+.layout-panel{grid-area:layout}
+.layout-editor{display:grid;grid-template-columns:132px minmax(360px,680px) minmax(620px,1fr);gap:14px;align-items:start}
+.palette{display:flex;flex-direction:column;gap:8px}
+.palette button{width:100%;background:#fff;color:#111}
+.layout-workspace{min-width:0}
+.layout-canvas{position:relative;width:100%;max-width:680px;aspect-ratio:600/800;background-color:#f8f8f3;background-image:linear-gradient(to right,rgba(17,17,17,.12) 1px,transparent 1px),linear-gradient(to bottom,rgba(17,17,17,.12) 1px,transparent 1px);background-size:var(--grid-x,4%) var(--grid-y,3%),var(--grid-x,4%) var(--grid-y,3%);border:2px solid #111;overflow:hidden;touch-action:none}
+.layout-node{position:absolute;box-sizing:border-box;border:2px solid #111;background:#fff;cursor:move;user-select:none;overflow:hidden;font-size:12px;font-weight:800;display:flex;align-items:flex-start;justify-content:space-between;padding:7px;color:#111}
+.layout-node.clock,.layout-node.weather{background:#f8f8f3}
+.layout-node.selected{outline:3px solid #111;outline-offset:2px;background:#e8f2e8}
+.layout-node small{font-size:10px;font-weight:600;color:#555;margin-top:2px}
+.snap-guide{position:absolute;z-index:4;pointer-events:none;background:#111}
+.snap-guide.vertical{top:0;bottom:0;width:2px;transform:translateX(-1px)}
+.snap-guide.horizontal{left:0;right:0;height:2px;transform:translateY(-1px)}
+.resize-handle{position:absolute;right:0;bottom:0;width:18px;height:18px;border-left:2px solid #111;border-top:2px solid #111;background:#fff;cursor:nwse-resize}
+.layout-props{border-left:1px solid #111;padding-left:14px;align-self:start;min-width:0}
+.layout-props strong{display:block;font-size:13px;margin-bottom:6px}
+.layout-props button{margin-top:8px;background:#fff;color:#111}
+.config-panels{display:grid;grid-template-columns:minmax(260px,1fr) minmax(300px,1.15fr);gap:14px;align-items:start}
+.config-box{border:1px solid #111;background:#fff;padding:12px;min-width:0}
+.config-box h3{font-size:16px;margin:0 0 10px}
+.component-kind{font-size:12px;color:#555;margin:-4px 0 10px}
+.prop-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}
+.prop-grid label{margin-top:0}
+.component-settings{display:grid;grid-template-columns:1fr;gap:8px;border-top:1px solid #111;margin-top:10px;padding-top:10px}
+.component-settings label{margin-top:0}
+.component-settings .check{display:flex;align-items:center;gap:8px;border:1px solid #333;padding:8px;background:#fafafa}
+.component-settings .check input{width:auto;margin:0}
+.source-settings[hidden]{display:none}
+	.preview{grid-area:preview}
 	.preview-frame{overflow:auto}
 	.preview-frame img{width:min(100%,600px);height:auto;border:1px solid #111;background:#fff}
 	.preview-frame.landscape img{width:min(100%,900px)}
 .hint{font-size:12px;color:#555;margin-top:4px;line-height:1.4}
-@media(max-width:900px){main{grid-template-columns:1fr}.preview{position:static}}
+@media(max-width:1280px){main{grid-template-columns:1fr;grid-template-areas:"layout" "settings" "preview"}.layout-editor{grid-template-columns:1fr}.layout-props{border-left:0;border-top:1px solid #111;padding-left:0;padding-top:10px}.config-panels{grid-template-columns:1fr}.palette{display:grid;grid-template-columns:repeat(2,1fr)}}
 </style>
 </head>
 	<body>
@@ -484,7 +617,7 @@ button{padding:10px 14px;border:1px solid #111;background:#111;color:#fff;font-w
 	<div class="sub">{{.Text.ConfigFile}}: {{.Config.ConfigFile}}</div>
 	</header>
 	<main>
-	<form method="post" action="/admin/config">
+	<form id="admin-form" class="settings-form" method="post" action="/admin/config">
 	<input type="hidden" name="token" value="{{.Token}}">
 	{{if .Saved}}<div class="ok">{{.Text.SavedMessage}}</div>{{end}}
 	{{if .Error}}<div class="err">{{.Error}}</div>{{end}}
@@ -515,32 +648,63 @@ button{padding:10px 14px;border:1px solid #111;background:#111;color:#fff;font-w
 <option value="rotated" {{if .RotatedSelected}}selected{{end}}>rotated</option>
 </select>
 	</section>
-	
-	<section>
-	<h2>{{.Text.Weather}}</h2>
+
+	<div class="actions">
+	<button type="submit">{{.Text.SaveAndReload}}</button>
+	</div>
+	</form>
+
+	<section class="layout-panel">
+	<h2>{{.Text.Layout}}</h2>
+	<input id="layout-json" type="hidden" name="layout_json" form="admin-form">
+	<div id="layout-editor" class="layout-editor" data-artboard="{{.LayoutArtboard}}">
+	<div>
+	<strong>{{.Text.ComponentLibrary}}</strong>
+	<div id="component-palette" class="palette"></div>
+	</div>
+	<div class="layout-workspace">
+	<div id="layout-canvas" class="layout-canvas"></div>
+	</div>
+	<div class="layout-props">
+	<div id="component-empty" class="hint">{{.Text.NoComponentSelected}}</div>
+	<div id="component-props" hidden>
+	<div class="config-panels">
+	<div class="view-settings config-box">
+	<h3>{{.Text.View}}</h3>
+	<div id="component-title" class="component-kind">{{.Text.SelectedComponent}}</div>
+	<div class="prop-grid">
+	<label>x<input id="prop-x" type="number"></label>
+	<label>y<input id="prop-y" type="number"></label>
+	<label>w<input id="prop-w" type="number"></label>
+	<label>h<input id="prop-h" type="number"></label>
+	</div>
+	<div id="component-settings" class="component-settings"></div>
+	<button id="delete-component" type="button">{{.Text.DeleteComponent}}</button>
+	</div>
+	<div class="source-settings config-box" data-component-source="weather" hidden>
+	<h3>{{.Text.ConfigWeather}}</h3>
 	<label>{{.Text.Provider}}</label>
-	<select name="weather_provider">
+	<select form="admin-form" name="weather_provider">
 	<option value="openmeteo" {{if .OpenSelected}}selected{{end}}>Open-Meteo</option>
 	<option value="caiyun" {{if .CaiyunSelected}}selected{{end}}>Caiyun</option>
 	</select>
 	<div class="row">
-	<div><label>{{.Text.Latitude}}</label><input name="weather_latitude" value="{{printf "%.6f" .Config.WeatherLatitude}}"></div>
-	<div><label>{{.Text.Longitude}}</label><input name="weather_longitude" value="{{printf "%.6f" .Config.WeatherLongitude}}"></div>
+	<div><label>{{.Text.Latitude}}</label><input form="admin-form" name="weather_latitude" value="{{printf "%.6f" .Config.WeatherLatitude}}"></div>
+	<div><label>{{.Text.Longitude}}</label><input form="admin-form" name="weather_longitude" value="{{printf "%.6f" .Config.WeatherLongitude}}"></div>
 	</div>
 	<label>{{.Text.LocationLabel}}</label>
-	<input name="weather_location" value="{{.Config.WeatherLocation}}" placeholder="Shanghai">
+	<input form="admin-form" name="weather_location" value="{{.Config.WeatherLocation}}" placeholder="Shanghai">
 	<label>{{.Text.CaiyunToken}}</label>
 	<div class="secret">{{if .CaiyunConfigured}}{{.Text.ConfiguredKeepToken}}{{else}}{{.Text.NotConfiguredPasteToken}}{{end}}</div>
-	<input name="caiyun_token" type="password" value="" placeholder="{{if .CaiyunConfigured}}{{.Text.LeaveBlankKeepToken}}{{else}}{{.Text.PasteCaiyunToken}}{{end}}" autocomplete="off">
-	{{if .CaiyunConfigured}}<label><input style="width:auto" type="checkbox" name="clear_caiyun_token" value="1"> {{.Text.ClearSavedCaiyunToken}}</label>{{end}}
+	<input form="admin-form" name="caiyun_token" type="password" value="" placeholder="{{if .CaiyunConfigured}}{{.Text.LeaveBlankKeepToken}}{{else}}{{.Text.PasteCaiyunToken}}{{end}}" autocomplete="off">
+	{{if .CaiyunConfigured}}<label><input form="admin-form" style="width:auto" type="checkbox" name="clear_caiyun_token" value="1"> {{.Text.ClearSavedCaiyunToken}}</label>{{end}}
 	<div class="row">
-	<div><label>{{.Text.CaiyunLang}}</label><input name="caiyun_lang" value="{{.Config.CaiyunLang}}"></div>
-	<div><label>{{.Text.CaiyunUnit}}</label><input name="caiyun_unit" value="{{.Config.CaiyunUnit}}"></div>
+	<div><label>{{.Text.CaiyunLang}}</label><input form="admin-form" name="caiyun_lang" value="{{.Config.CaiyunLang}}"></div>
+	<div><label>{{.Text.CaiyunUnit}}</label><input form="admin-form" name="caiyun_unit" value="{{.Config.CaiyunUnit}}"></div>
 	</div>
-	</section>
-	
-	<section>
-	<h2>{{.Text.GoogleCalendar}}</h2>
+	</div>
+	<div class="source-settings config-box" data-component-source="calendar" hidden>
+	<h3>{{.Text.ConfigCalendar}}</h3>
 	<div class="secret">{{.CalendarSummary}}. {{.Text.CalendarSecretHint}}</div>
 	{{if .CalendarConfigured}}
 	<label>{{.Text.ConfiguredFeeds}}</label>
@@ -548,25 +712,26 @@ button{padding:10px 14px;border:1px solid #111;background:#111;color:#fff;font-w
 	<div class="feed">
 	<div>
 	<strong>{{.Label}}</strong>
-		<span>{{.Host}} · {{$.Text.Fingerprint}} {{.Fingerprint}}</span>
+	<span>{{.Host}} · {{$.Text.Fingerprint}} {{.Fingerprint}}</span>
 	</div>
-	<label class="delete-toggle"><input type="checkbox" name="delete_calendar_indices" value="{{.Index}}"> {{$.Text.DeleteOnSave}}</label>
+	<label class="delete-toggle"><input form="admin-form" type="checkbox" name="delete_calendar_indices" value="{{.Index}}"> {{$.Text.DeleteOnSave}}</label>
 	</div>
 	{{end}}
 	{{end}}
 	<label>{{.Text.AddPrivateICalURLs}}</label>
-	<textarea name="calendar_ics_urls" spellcheck="false" placeholder="{{.Text.ICalPlaceholder}}"></textarea>
+	<textarea form="admin-form" name="calendar_ics_urls" spellcheck="false" placeholder="{{.Text.ICalPlaceholder}}"></textarea>
 	<div class="hint">{{.Text.CalendarHint}}</div>
 	<div class="row">
-	<div><label>{{.Text.LookaheadDays}}</label><input name="calendar_lookahead_days" type="number" min="1" value="{{.Config.CalendarLookaheadDay}}"></div>
-	<div><label>{{.Text.MaxEvents}}</label><input name="calendar_max_events" type="number" min="1" value="{{.Config.CalendarMaxEvents}}"></div>
+	<div><label>{{.Text.LookaheadDays}}</label><input form="admin-form" name="calendar_lookahead_days" type="number" min="1" value="{{.Config.CalendarLookaheadDay}}"></div>
+	<div><label>{{.Text.MaxEvents}}</label><input form="admin-form" name="calendar_max_events" type="number" min="1" value="{{.Config.CalendarMaxEvents}}"></div>
 	</div>
+	</div>
+	</div>
+	</div>
+	</div>
+	</div>
+	<div class="hint">{{.Text.LayoutHint}}</div>
 	</section>
-	
-	<div class="actions">
-	<button type="submit">{{.Text.SaveAndReload}}</button>
-	</div>
-	</form>
 	
 	<aside class="preview">
 	<section>
@@ -578,5 +743,360 @@ button{padding:10px 14px;border:1px solid #111;background:#111;color:#fff;font-w
 	</section>
 	</aside>
 </main>
+<script type="application/json" id="layout-data">{{.LayoutJSON}}</script>
+<script type="application/json" id="component-catalog-data">{{.ComponentCatalogJSON}}</script>
+<script>
+(function(){
+var dataEl=document.getElementById("layout-data");
+var catalogEl=document.getElementById("component-catalog-data");
+var editor=document.getElementById("layout-editor");
+var canvas=document.getElementById("layout-canvas");
+var hidden=document.getElementById("layout-json");
+var palette=document.getElementById("component-palette");
+var props=document.getElementById("component-props");
+var empty=document.getElementById("component-empty");
+var title=document.getElementById("component-title");
+var deleteButton=document.getElementById("delete-component");
+var inputs={x:document.getElementById("prop-x"),y:document.getElementById("prop-y"),w:document.getElementById("prop-w"),h:document.getElementById("prop-h")};
+var componentSettings=document.getElementById("component-settings");
+var sourceSettings=document.querySelectorAll("[data-component-source]");
+if(!dataEl||!catalogEl||!editor||!canvas||!hidden||!componentSettings){return;}
+var doc=JSON.parse(dataEl.textContent||"{}");
+var catalog=JSON.parse(catalogEl.textContent||"[]");
+var artboardKey=editor.getAttribute("data-artboard")||"portrait";
+var selectedId="";
+var drag=null;
+var activeGuides=[];
+var GRID=12;
+var SNAP=8;
+var defs={};
+catalog.forEach(function(item){defs[item.type]=item;});
+var isChinese=(document.documentElement.lang||"").toLowerCase().indexOf("zh")===0;
+function ui(en,zh){
+  return isChinese ? zh : en;
+}
+var settingsByType={
+  clock:[
+    {key:"format",label:ui("Time format","时间格式"),type:"select",defaultValue:"15:04",options:[["15:04","24h"],["3:04 PM","12h"]]},
+    {key:"show_date",label:ui("Show date","显示日期"),type:"checkbox",defaultValue:"true"}
+  ],
+  weather:[
+    {key:"show_condition",label:ui("Show condition","显示天气状况"),type:"checkbox",defaultValue:"true"},
+    {key:"show_high_low",label:ui("Show high/low","显示高低温"),type:"checkbox",defaultValue:"true"},
+    {key:"show_meta",label:ui("Show location/wind","显示地点和风速"),type:"checkbox",defaultValue:"true"}
+  ],
+  calendar:[
+    {key:"title",label:ui("Title","标题"),type:"text",defaultValue:ui("Calendar","日程")},
+    {key:"max_items",label:ui("Max events","最多事件"),type:"number",defaultValue:"",min:"1",max:"20"}
+  ],
+  ai_usage:[
+    {key:"title",label:ui("Title","标题"),type:"text",defaultValue:ui("AI Usage","AI 用量")},
+    {key:"max_items",label:ui("Max rows","最多行数"),type:"number",defaultValue:"",min:"1",max:"10"}
+  ],
+  notes:[
+    {key:"title",label:ui("Title","标题"),type:"text",defaultValue:ui("Notes","备注")},
+    {key:"max_items",label:ui("Max notes","最多备注"),type:"number",defaultValue:"",min:"1",max:"20"}
+  ]
+};
+function ensureBoard(){
+  if(!doc.version){doc.version=1;}
+  if(!doc.artboards){doc.artboards={};}
+  if(!doc.artboards[artboardKey]){
+    doc.artboards[artboardKey]={width:artboardKey==="landscape"?800:600,height:artboardKey==="landscape"?600:800,components:[]};
+  }
+  if(!doc.artboards[artboardKey].components){doc.artboards[artboardKey].components=[];}
+  return doc.artboards[artboardKey];
+}
+function labelFor(type){
+  return defs[type] ? defs[type].label : type;
+}
+function displayName(component){
+  return component.props && component.props.title ? component.props.title : labelFor(component.type);
+}
+function clamp(value,min,max){
+  value=Math.round(value);
+  if(value<min){return min;}
+  if(value>max){return max;}
+  return value;
+}
+function snapToGrid(value){
+  return Math.round(value/GRID)*GRID;
+}
+function alignmentStops(board, ignoreId, axis){
+  var limit=axis==="x"?board.width:board.height;
+  var stops=[0,limit,limit/2];
+  board.components.forEach(function(component){
+    if(component.id===ignoreId){return;}
+    var start=axis==="x"?component.x:component.y;
+    var size=axis==="x"?component.w:component.h;
+    stops.push(start,start+size/2,start+size);
+  });
+  return stops;
+}
+function edgeSnap(value, stops){
+  var best=null;
+  var bestDistance=SNAP+1;
+  stops.forEach(function(stop){
+    var distance=Math.abs(stop-value);
+    if(distance<=SNAP&&distance<bestDistance){
+      bestDistance=distance;
+      best=stop;
+    }
+  });
+  return best;
+}
+function axisSnap(origin, offsets, stops){
+  var bestDelta=0;
+  var bestGuide=null;
+  var bestDistance=SNAP+1;
+  offsets.forEach(function(offset){
+    var snapped=edgeSnap(origin+offset,stops);
+    if(snapped===null){return;}
+    var distance=Math.abs(snapped-(origin+offset));
+    if(distance<bestDistance){
+      bestDistance=distance;
+      bestDelta=snapped-(origin+offset);
+      bestGuide=snapped;
+    }
+  });
+  return {value:origin+bestDelta,guide:bestGuide};
+}
+function snapMove(board, component, x, y){
+  x=clamp(snapToGrid(x),0,board.width-component.w);
+  y=clamp(snapToGrid(y),0,board.height-component.h);
+  var xSnap=axisSnap(x,[0,component.w/2,component.w],alignmentStops(board,component.id,"x"));
+  var ySnap=axisSnap(y,[0,component.h/2,component.h],alignmentStops(board,component.id,"y"));
+  activeGuides=[];
+  if(xSnap.guide!==null){activeGuides.push({axis:"x",value:xSnap.guide});}
+  if(ySnap.guide!==null){activeGuides.push({axis:"y",value:ySnap.guide});}
+  return {
+    x:clamp(xSnap.value,0,board.width-component.w),
+    y:clamp(ySnap.value,0,board.height-component.h)
+  };
+}
+function snapResize(board, component, w, h, def){
+  w=clamp(snapToGrid(w),def.min_w,board.width-component.x);
+  h=clamp(snapToGrid(h),def.min_h,board.height-component.y);
+  activeGuides=[];
+  var right=edgeSnap(component.x+w,alignmentStops(board,component.id,"x"));
+  if(right!==null){
+    w=clamp(right-component.x,def.min_w,board.width-component.x);
+    activeGuides.push({axis:"x",value:right});
+  }
+  var bottom=edgeSnap(component.y+h,alignmentStops(board,component.id,"y"));
+  if(bottom!==null){
+    h=clamp(bottom-component.y,def.min_h,board.height-component.y);
+    activeGuides.push({axis:"y",value:bottom});
+  }
+  return {w:w,h:h};
+}
+function selectedComponent(){
+  var board=ensureBoard();
+  return board.components.find(function(component){return component.id===selectedId;})||null;
+}
+function ensureProps(component){
+  if(!component.props){component.props={};}
+  return component.props;
+}
+function propValue(component, setting){
+  var props=component.props||{};
+  if(props[setting.key]!==undefined&&props[setting.key]!==null&&props[setting.key]!==""){
+    return props[setting.key];
+  }
+  return setting.defaultValue||"";
+}
+function writeProp(component, setting, value){
+  var props=ensureProps(component);
+  if(value===""||value===setting.defaultValue){
+    delete props[setting.key];
+  }else{
+    props[setting.key]=String(value);
+  }
+  if(Object.keys(props).length===0){
+    delete component.props;
+  }
+  updateHidden();
+}
+function renderComponentSettings(component){
+  componentSettings.innerHTML="";
+  var settings=settingsByType[component.type]||[];
+  settings.forEach(function(setting){
+    var label=document.createElement("label");
+    if(setting.type==="checkbox"){
+      label.className="check";
+      var checkbox=document.createElement("input");
+      checkbox.type="checkbox";
+      checkbox.checked=propValue(component,setting)!=="false";
+      checkbox.addEventListener("change",function(){
+        writeProp(component,setting,checkbox.checked?"true":"false");
+      });
+      label.appendChild(checkbox);
+      label.appendChild(document.createTextNode(setting.label));
+      componentSettings.appendChild(label);
+      return;
+    }
+    label.textContent=setting.label;
+    var input=setting.type==="select" ? document.createElement("select") : document.createElement("input");
+    if(setting.type==="select"){
+      setting.options.forEach(function(option){
+        var item=document.createElement("option");
+        item.value=option[0];
+        item.textContent=option[1];
+        input.appendChild(item);
+      });
+    }else{
+      input.type=setting.type;
+      if(setting.min){input.min=setting.min;}
+      if(setting.max){input.max=setting.max;}
+    }
+    input.value=propValue(component,setting);
+    input.addEventListener("change",function(){
+      writeProp(component,setting,input.value.trim());
+      if(setting.key==="title"){render();}
+    });
+    label.appendChild(input);
+    componentSettings.appendChild(label);
+  });
+}
+function renderSourceSettings(component){
+  sourceSettings.forEach(function(panel){
+    panel.hidden=!component||panel.getAttribute("data-component-source")!==component.type;
+  });
+}
+function updateHidden(){
+  hidden.value=JSON.stringify(doc);
+}
+function updateProps(){
+  var component=selectedComponent();
+  empty.hidden=!!component;
+  props.hidden=!component;
+  if(!component){
+    componentSettings.innerHTML="";
+    renderSourceSettings(null);
+    return;
+  }
+  title.textContent=labelFor(component.type);
+  inputs.x.value=component.x;
+  inputs.y.value=component.y;
+  inputs.w.value=component.w;
+  inputs.h.value=component.h;
+  renderComponentSettings(component);
+  renderSourceSettings(component);
+}
+function render(){
+  var board=ensureBoard();
+  canvas.style.aspectRatio=board.width+" / "+board.height;
+  canvas.style.setProperty("--grid-x",(GRID/board.width*100)+"%");
+  canvas.style.setProperty("--grid-y",(GRID/board.height*100)+"%");
+  canvas.innerHTML="";
+  board.components.forEach(function(component){
+    var node=document.createElement("div");
+    node.className="layout-node "+component.type+(component.id===selectedId?" selected":"");
+    node.style.left=(component.x/board.width*100)+"%";
+    node.style.top=(component.y/board.height*100)+"%";
+    node.style.width=(component.w/board.width*100)+"%";
+    node.style.height=(component.h/board.height*100)+"%";
+    node.dataset.id=component.id;
+    var text=document.createElement("div");
+    text.textContent=displayName(component);
+    var meta=document.createElement("small");
+    meta.textContent=component.w+"x"+component.h;
+    text.appendChild(document.createElement("br"));
+    text.appendChild(meta);
+    node.appendChild(text);
+    var handle=document.createElement("span");
+    handle.className="resize-handle";
+    handle.dataset.resize="1";
+    node.appendChild(handle);
+    canvas.appendChild(node);
+  });
+  activeGuides.forEach(function(guide){
+    var node=document.createElement("span");
+    node.className="snap-guide "+(guide.axis==="x"?"vertical":"horizontal");
+    if(guide.axis==="x"){
+      node.style.left=(guide.value/board.width*100)+"%";
+    }else{
+      node.style.top=(guide.value/board.height*100)+"%";
+    }
+    canvas.appendChild(node);
+  });
+  updateProps();
+  updateHidden();
+}
+function beginDrag(event, mode, component){
+  var board=ensureBoard();
+  var rect=canvas.getBoundingClientRect();
+  drag={mode:mode,id:component.id,startX:event.clientX,startY:event.clientY,originX:component.x,originY:component.y,originW:component.w,originH:component.h,scaleX:board.width/rect.width,scaleY:board.height/rect.height};
+  selectedId=component.id;
+  activeGuides=[];
+  render();
+  event.preventDefault();
+}
+canvas.addEventListener("pointerdown",function(event){
+  var node=event.target.closest(".layout-node");
+  if(!node){selectedId="";render();return;}
+  var board=ensureBoard();
+  var component=board.components.find(function(item){return item.id===node.dataset.id;});
+  if(!component){return;}
+  beginDrag(event,event.target.dataset.resize==="1"?"resize":"move",component);
+});
+window.addEventListener("pointermove",function(event){
+  if(!drag){return;}
+  var board=ensureBoard();
+  var component=board.components.find(function(item){return item.id===drag.id;});
+  if(!component){return;}
+  var dx=(event.clientX-drag.startX)*drag.scaleX;
+  var dy=(event.clientY-drag.startY)*drag.scaleY;
+  var def=defs[component.type]||{min_w:80,min_h:60};
+  if(drag.mode==="resize"){
+    var size=snapResize(board,component,drag.originW+dx,drag.originH+dy,def);
+    component.w=size.w;
+    component.h=size.h;
+  }else{
+    var position=snapMove(board,component,drag.originX+dx,drag.originY+dy);
+    component.x=position.x;
+    component.y=position.y;
+  }
+  render();
+});
+window.addEventListener("pointerup",function(){drag=null;activeGuides=[];render();});
+catalog.forEach(function(item){
+  var button=document.createElement("button");
+  button.type="button";
+  button.textContent=item.label;
+  button.addEventListener("click",function(){
+    var board=ensureBoard();
+    var n=board.components.length+1;
+    var component={id:item.type+"-"+Date.now().toString(36),type:item.type,x:clamp(24+n*14,0,board.width-item.default_w),y:clamp(24+n*14,0,board.height-item.default_h),w:item.default_w,h:item.default_h};
+    board.components.push(component);
+    selectedId=component.id;
+    render();
+  });
+  palette.appendChild(button);
+});
+Object.keys(inputs).forEach(function(key){
+  inputs[key].addEventListener("input",function(){
+    var component=selectedComponent();
+    if(!component){return;}
+    var board=ensureBoard();
+    var value=parseInt(inputs[key].value,10);
+    if(!Number.isFinite(value)){return;}
+    if(key==="x"){component.x=clamp(value,0,board.width-component.w);}
+    if(key==="y"){component.y=clamp(value,0,board.height-component.h);}
+    if(key==="w"){component.w=clamp(value,(defs[component.type]||{}).min_w||80,board.width-component.x);}
+    if(key==="h"){component.h=clamp(value,(defs[component.type]||{}).min_h||60,board.height-component.y);}
+    render();
+  });
+});
+deleteButton.addEventListener("click",function(){
+  var board=ensureBoard();
+  board.components=board.components.filter(function(component){return component.id!==selectedId;});
+  selectedId="";
+  render();
+});
+document.querySelector("form").addEventListener("submit",updateHidden);
+render();
+})();
+</script>
 </body>
 </html>`))

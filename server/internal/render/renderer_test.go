@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"ink-dashboard/server/internal/dashboard"
+	"ink-dashboard/server/internal/layout"
 )
 
 func TestRenderSVGTruncatesLongScheduleTitles(t *testing.T) {
@@ -229,5 +230,81 @@ func TestRenderSVGOmitsNotesInLandscape(t *testing.T) {
 	}
 	if strings.Contains(svg, "refresh managed by KOReader") || strings.Contains(svg, "800x600") {
 		t.Fatal("expected footer to be omitted")
+	}
+}
+
+func TestRenderSVGUsesPositionedLayoutComponents(t *testing.T) {
+	svg := renderSVG(RenderRequest{
+		Width:       600,
+		Height:      800,
+		Orientation: "auto",
+		Language:    "en",
+		Layout: layout.Document{
+			Version: 1,
+			Artboards: map[string]layout.Artboard{
+				"portrait": {
+					Width:  600,
+					Height: 800,
+					Components: []layout.Component{
+						{ID: "notes-1", Type: "notes", X: 50, Y: 70, W: 300, H: 150},
+					},
+				},
+			},
+		},
+		Snapshot: dashboard.Snapshot{
+			Notes: []string{"Pinned from the canvas"},
+		},
+	})
+
+	if !strings.Contains(svg, `x="50" y="70" width="300" height="150"`) {
+		t.Fatal("expected notes component to render at the configured rectangle")
+	}
+	if !strings.Contains(svg, "Pinned from the canvas") {
+		t.Fatal("expected configured notes component content")
+	}
+	if strings.Contains(svg, ">Calendar<") {
+		t.Fatal("expected renderer not to add default calendar outside the configured layout")
+	}
+}
+
+func TestRenderSVGUsesComponentProps(t *testing.T) {
+	svg := renderSVG(RenderRequest{
+		Width:       600,
+		Height:      800,
+		Orientation: "auto",
+		Language:    "en",
+		Layout: layout.Document{
+			Version: 1,
+			Artboards: map[string]layout.Artboard{
+				"portrait": {
+					Width:  600,
+					Height: 800,
+					Components: []layout.Component{
+						{ID: "clock-1", Type: "clock", X: 20, Y: 20, W: 220, H: 80, Props: map[string]string{"format": "3:04 PM", "show_date": "false"}},
+						{ID: "calendar-1", Type: "calendar", X: 20, Y: 120, W: 360, H: 300, Props: map[string]string{"title": "Today Only", "max_items": "1"}},
+					},
+				},
+			},
+		},
+		Snapshot: dashboard.Snapshot{
+			GeneratedAt: time.Date(2026, 6, 8, 13, 11, 0, 0, time.UTC),
+			Events: []dashboard.Event{
+				{Day: "Today", Time: "09:30", Title: "First event", Meta: "30 min"},
+				{Day: "Today", Time: "10:30", Title: "Second event", Meta: "30 min"},
+			},
+		},
+	})
+
+	if !strings.Contains(svg, "1:11 PM") {
+		t.Fatal("expected clock format prop to be used")
+	}
+	if strings.Contains(svg, "Updated 13:11:00") {
+		t.Fatal("expected show_date=false to hide the clock date")
+	}
+	if !strings.Contains(svg, "Today Only") || !strings.Contains(svg, "First event") {
+		t.Fatal("expected calendar title prop and first event")
+	}
+	if strings.Contains(svg, "Second event") {
+		t.Fatal("expected max_items=1 to limit calendar events")
 	}
 }

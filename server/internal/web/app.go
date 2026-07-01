@@ -122,6 +122,7 @@ func (a *App) renderRequest(r *http.Request) (render.RenderRequest, error) {
 		Height:      height,
 		Orientation: orientation,
 		Language:    cfg.Language,
+		Layout:      cfg.Layout,
 		LocalClock:  boolFromHeaderOrQuery(r, "local-clock", "local_clock"),
 		Snapshot:    snapshot,
 	}, nil
