@@ -1,0 +1,6 @@
+.env
+config.local.json
+server/.env
+server/config.local.json
+server/public/screens/*.png
+server/inkdash

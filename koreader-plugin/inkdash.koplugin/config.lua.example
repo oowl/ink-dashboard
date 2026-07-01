@@ -1,0 +1,13 @@
+return {
+    api_key = "change-me",
+    base_url = "http://192.168.1.20:8787",
+    refresh_interval = 600,
+    use_server_refresh_rate = true,
+    refresh_type = "ui",
+    orientation = "auto",
+    show_notifications = true,
+    local_clock = true,
+    local_clock_live_minutes = false,
+    local_clock_language = "auto",
+    image_cache_seconds = -1,
+}
